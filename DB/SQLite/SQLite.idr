@@ -19,6 +19,26 @@ data DBPointer = ValidConn Ptr
 data StmtPointer = ValidStmt Ptr
                  | InvalidStmt 
 
+
+data DBError = DBConnFail
+             | DBBindFail
+             | DBStatementFail
+             | DBExecuteFail
+             | DBGetArgFail
+             | DBFinaliseFail
+             | DBCloseFail
+             | DBResetFail
+
+instance Show DBError where
+  show DBConnFail = "Error connecting to database"
+  show DBBindFail = "Error binding data to prepared statement"
+  show DBStatementFail = "Error preparing statement"
+  show DBExecuteFail = "Error executing prepared statement"
+  show DBGetArgFail = "Error retrieving column information from the database"
+  show DBCloseFail = "Error closing database connection"
+  show DBFinaliseFail = "Error finalising prepared statement"
+  show DBResetFail = "Error resetting row pointer"
+
 -- Surely these can be consolidated into one?
 -- Also, I should ideally fix the imports to stop duplicating these defs.
 data DBVal = DBInt Int
@@ -51,43 +71,36 @@ data SQLiteRes : Step -> Type where
 
 data Sqlite : Effect where
   -- Opens a connection to the database
-  OpenDB : String -> Sqlite () (SQLiteRes ConnectionOpened) Bool
+  OpenDB : String -> Sqlite () (SQLiteRes ConnectionOpened) () 
   -- Closes the database handle
-  CloseDB : Sqlite (SQLiteRes ConnectionOpened) () Bool
+  CloseDB : Sqlite (SQLiteRes ConnectionOpened) () ()
   -- Creates a new prepared statement given a basic query string
   PrepareStatement : String -> Sqlite (SQLiteRes ConnectionOpened) 
-                                      (SQLiteRes PreparedStatementOpen) Bool
+                                      (SQLiteRes PreparedStatementOpen) ()
 
   -- Transition to the binding state, allowing for variables to be bound to the statement
   StartBind : Sqlite (SQLiteRes PreparedStatementOpen) (SQLiteRes PreparedStatementBinding) ()
 
   -- Binds an integer to the given argument
   BindInt : ArgPos -> Int -> Sqlite (SQLiteRes PreparedStatementBinding) 
-                                    (SQLiteRes PreparedStatementBinding) Bool
+                                    (SQLiteRes PreparedStatementBinding) ()
 
   -- Binds a float to the given argument
   BindFloat : ArgPos -> Float -> Sqlite (SQLiteRes PreparedStatementBinding) 
-                                        (SQLiteRes PreparedStatementBinding) Bool 
+                                        (SQLiteRes PreparedStatementBinding) ()
 
   -- Binds a string to the given argument
   BindText : ArgPos -> (text : String) -> 
                        (length : Int) -> 
                        Sqlite (SQLiteRes PreparedStatementBinding) 
-                              (SQLiteRes PreparedStatementBinding) Bool
+                              (SQLiteRes PreparedStatementBinding) ()
 
   -- Binds a NULL value to the given argument
   BindNull : ArgPos -> Sqlite (SQLiteRes PreparedStatementBinding) 
-                              (SQLiteRes PreparedStatementBinding) Bool
-
-{- Handle outside of IO, by calling appropriate effect functions
-  -- Binds multiple values at once
-  BindMulti : List (ArgPos, Value) -> 
-              Sqlite (SQLiteRes PreparedStatementBinding) 
-                     (SQLiteRes PreparedStatementBinding) Bool
-                     -}
+                              (SQLiteRes PreparedStatementBinding) ()
 
   -- Transitions out of the binding state, allowing for the query to be executed
-  FinishBind : Sqlite (SQLiteRes PreparedStatementBinding) (SQLiteRes PreparedStatementBound) Bool
+  FinishBind : Sqlite (SQLiteRes PreparedStatementBinding) (SQLiteRes PreparedStatementBound) ()
 
   -- Executes the given prepared statement
   ExecuteStatement : Sqlite (SQLiteRes PreparedStatementBound) (SQLiteRes PreparedStatementExecuting) ()
@@ -98,7 +111,7 @@ data Sqlite : Effect where
                         Table
                         -}
   -- Disposes of a prepared statement
-  Finalise : Sqlite (SQLiteRes PreparedStatementExecuting) (SQLiteRes ConnectionOpened) Bool
+  Finalise : Sqlite (SQLiteRes PreparedStatementExecuting) (SQLiteRes ConnectionOpened) ()
 
 
   ----- Operations on result sets.
@@ -141,29 +154,31 @@ data Sqlite : Effect where
 
   Reset : Sqlite (SQLiteRes PreparedStatementExecuting)
                  (SQLiteRes PreparedStatementExecuting)
-                 Bool
+                 ()
 
 
 
 -- TODO: Must also do this in IOExcept, runtime errors are bad, mmkay
-instance Handler Sqlite IO where
+instance Handler Sqlite (IOExcept DBError) where
   handle () (OpenDB file) k = do
-    ff <- mkForeign (FFun "sqlite3_open_idr" [FString] FPtr) file
-    is_null <- nullPtr ff
+    ff <- ioe_lift (mkForeign (FFun "sqlite3_open_idr" [FString] FPtr) file)
+    is_null <- ioe_lift (nullPtr ff)
     -- We still have to transition to ConnectionOpened, even if the
     -- open operation failed. We can, however, tag the connection resource
     -- as invalid, and pattern match on it so that no further effects occur.
-    if (not is_null) then k (OpenConn (ValidConn ff)) True
-                     else k (OpenConn InvalidConn) False
+    if (not is_null) then k (OpenConn (ValidConn ff)) ()
+                     else ioe_fail DBConnFail -- k (OpenConn InvalidConn) False
     -- k (Valid ff) ()
 
   -- TODO: Probably best to do some error handling here
   handle (OpenConn (ValidConn conn) ) CloseDB k = do
-    mkForeign (FFun "sqlite3_close_idr" [FPtr] FInt) conn
-    k () True
+    res <- io_lift (mkForeign (FFun "sqlite3_close_idr" [FPtr] FInt) conn)
+    -- Underlying library returns 0 on success, some error code otherwise
+    if res == 0 then k () ()
+                else ioe_fail DBCloseFail
 
   -- If the handle is invalid, just return true without doing anything
-  handle (OpenConn (InvalidConn)) CloseDB k = k () True
+  handle (OpenConn (InvalidConn)) CloseDB k = k () ()
 
   -- Compile a prepared statement.
   -- If there's no connection, do nothing and return false, with an invalid statement
@@ -171,43 +186,13 @@ instance Handler Sqlite IO where
 
   -- Otherwise, try to create a prepared statement
   handle (OpenConn (ValidConn c)) (PrepareStatement s) k = do
-    ps_ptr <-  mkForeign (FFun "sqlite3_prepare_idr" [FPtr, FString] FPtr) c s
-    is_null <- nullPtr ps_ptr
-    if (not is_null) then k (OpenStmt (ValidConn c) (ValidStmt ps_ptr)) True
-                     else k (OpenStmt (ValidConn c) (InvalidStmt)) False
-
-  -- Execute a prepared statement. 
-  handle (OpenStmt (ValidConn c) (ValidStmt s)) ExecuteStatement k = 
-    k (ExecutingStmt (ValidConn c) (ValidStmt s) Unstarted) ()
-    {-
-    Looks like it doesn't work how I thought it did. The best thing to do
-      right now, I think, is to just separate the finished binding stage
-      with a 'currently executing' stage. 
-
-    I might remove this stage later though.
-    do
-    x <- mkForeign (FFun "exec_db" [FPtr] FInt) s
-    -- Ideally, an execution failure should debar us from attempting 
-    -- to retrieve the results. 
-    -- Currently, we can do this, and the call would still go through to 
-    -- the library.
-    -- TODO: Fix this, possibly by having another type of StmtPointer which
-    -- signifies that the results have been tainted by some failure,
-    -- but that the pointer is still active and needs to be freed.
-    putStrLn ("SQLite status code: " ++ show x)
-    if (x == sqlite_OK) then k (OpenStmt (ValidConn c) (ValidStmt s)) True
-                        else k (OpenStmt (ValidConn c) (ValidStmt s)) False
-                        -}
-
-  handle (OpenStmt (ValidConn c) InvalidStmt) ExecuteStatement k = 
-    k (ExecutingStmt (ValidConn c) InvalidStmt StepFail) ()
-
-  handle (OpenStmt InvalidConn x) ExecuteStatement k = 
-    k (ExecutingStmt InvalidConn x StepFail) () --ExecuteStatement
+    ps_ptr <- ioe_lift (mkForeign (FFun "sqlite3_prepare_idr" [FPtr, FString] FPtr) c s)
+    is_null <- ioe_lift (nullPtr ps_ptr)
+    if (not is_null) then k (OpenStmt (ValidConn c) (ValidStmt ps_ptr)) ()
+                     else ioe_fail DBStatementFail
+        --k (OpenStmt (ValidConn c) (InvalidStmt)) False
 
   -- Bind state transition functions
-  -- TODO: error checking here? should this return true / false (or some 
-  --       more expressive error type at that
   handle (OpenStmt (ValidConn c) (ValidStmt s)) StartBind k = do
     k (OpenStmt (ValidConn c) (ValidStmt s)) ()
 
@@ -217,218 +202,211 @@ instance Handler Sqlite IO where
   handle (OpenStmt InvalidConn x) StartBind k = k (OpenStmt InvalidConn x) ()
 
   handle (OpenStmt (ValidConn c) (ValidStmt s)) FinishBind k = do
-    k (OpenStmt (ValidConn c) (ValidStmt s)) True
+    k (OpenStmt (ValidConn c) (ValidStmt s)) ()
 
   handle (OpenStmt (ValidConn c) InvalidStmt) FinishBind k = do
-    k (OpenStmt (ValidConn c) InvalidStmt) False
+    k (OpenStmt (ValidConn c) InvalidStmt) ()
 
-  handle (OpenStmt InvalidConn x) FinishBind k = k (OpenStmt InvalidConn x) False
+  handle (OpenStmt InvalidConn x) FinishBind k = k (OpenStmt InvalidConn x) ()
 
 
   -- Bind functions
   handle (OpenStmt (ValidConn c) (ValidStmt s)) (BindInt pos i) k = do
-    res <- mkForeign (FFun "sqlite3_bind_int_idr" [FPtr, FInt, FInt] FPtr) c pos i
-    is_null <- nullPtr res
-    if (not is_null) then k (OpenStmt (ValidConn c) (ValidStmt s)) True
-                     else k (OpenStmt (ValidConn c) (ValidStmt s)) False
+    res <- ioe_lift (mkForeign (FFun "sqlite3_bind_int_idr" [FPtr, FInt, FInt] FPtr) c pos i)
+    is_null <- ioe_lift (nullPtr res)
+    if (not is_null) then k (OpenStmt (ValidConn c) (ValidStmt s)) ()
+                     else ioe_fail DBBindFail
 
   handle (OpenStmt (ValidConn c) (ValidStmt s)) (BindFloat pos f) k = do
-    res <- mkForeign (FFun "sqlite3_bind_float_idr" [FPtr, FInt, FFloat] FPtr) c pos f
+    res <- ioe_lift (mkForeign (FFun "sqlite3_bind_float_idr" [FPtr, FInt, FFloat] FPtr) c pos f)
     is_null <- nullPtr res
-    if (not is_null) then k (OpenStmt (ValidConn c) (ValidStmt s)) True
-                     else k (OpenStmt (ValidConn c) (ValidStmt s)) False
+    if (not is_null) then k (OpenStmt (ValidConn c) (ValidStmt s)) ()
+                     else ioe_fail DBBindFail
 
 
   handle (OpenStmt (ValidConn c) (ValidStmt s)) (BindText pos str len) k = do
-    res <- mkForeign (FFun "sqlite3_bind_text_idr" [FPtr, FString, FInt, FInt] FPtr) c str pos len
-    is_null <- nullPtr res
-    if (not is_null) then k (OpenStmt (ValidConn c) (ValidStmt s)) True
-                     else k (OpenStmt (ValidConn c) (ValidStmt s)) False
+    res <- ioe_lift (mkForeign (FFun "sqlite3_bind_text_idr" [FPtr, FString, FInt, FInt] FPtr) c str pos len)
+    is_null <- ioe_lift (nullPtr res)
+    if (not is_null) then k (OpenStmt (ValidConn c) (ValidStmt s)) ()
+                     else ioe_fail DBBindFail 
 
   handle (OpenStmt (ValidConn c) (ValidStmt s)) (BindNull pos) k = do
-    res <- mkForeign (FFun "sqlite3_bind_null_idr" [FPtr, FInt] FPtr) c pos
-    is_null <- nullPtr res
-    if (not is_null) then k (OpenStmt (ValidConn c) (ValidStmt s)) True
-                     else k (OpenStmt (ValidConn c) (ValidStmt s)) False
+    res <- ioe_lift (mkForeign (FFun "sqlite3_bind_null_idr" [FPtr, FInt] FPtr) c pos)
+    is_null <- ioe_lift (nullPtr res)
+    if (not is_null) then k (OpenStmt (ValidConn c) (ValidStmt s)) ()
+                     else ioe_fail DBBindFail
 
-  -- Binds called with invalid args
-  handle (OpenStmt InvalidConn x) (BindInt _ _) k = k (OpenStmt InvalidConn x) False
-  handle (OpenStmt (ValidConn c) InvalidStmt) (BindInt _ _) k = 
-    k (OpenStmt (ValidConn c) InvalidStmt) False
-
-  handle (OpenStmt InvalidConn x) (BindFloat _ _) k = k (OpenStmt InvalidConn x) False
-  handle (OpenStmt (ValidConn c) InvalidStmt) (BindFloat _ _) k = 
-    k (OpenStmt (ValidConn c) InvalidStmt) False
-
-  handle (OpenStmt InvalidConn x) (BindText _ _ _) k = k (OpenStmt InvalidConn x) False
-  handle (OpenStmt (ValidConn c) InvalidStmt) (BindText _ _ _) k = 
-    k (OpenStmt (ValidConn c) InvalidStmt) False
-
-  handle (OpenStmt InvalidConn x) (BindNull _) k = k (OpenStmt InvalidConn x) False
-  handle (OpenStmt (ValidConn c) InvalidStmt) (BindNull _) k = 
-    k (OpenStmt (ValidConn c) InvalidStmt) False
-
-   
+ 
   -- Row operations
   -- These only pass the calls to the underlying library if the ExecutingStmt
   -- is tagged with StepComplete. This means that the resource access protocol
   -- is adhered to.
+
+  -- Unfortunately, we can't guarantee that conversions are correctly made, since
+  -- failure is not indicated by the underlying SQLite3 library. Trying to get a
+  -- Int from a String field, for example, will either convert a string representation
+  -- of the integer to an Int, or return the default value 0.
   handle (ExecutingStmt (ValidConn c) (ValidStmt s) StepComplete) (GetColumnName i) k = do
-    res <- mkForeign (FFun "sqlite3_column_name_idr" [FPtr, FInt] FString) c i 
+    res <- ioe_lift (mkForeign (FFun "sqlite3_column_name_idr" [FPtr, FInt] FString) c i)
     k (ExecutingStmt (ValidConn c) (ValidStmt s) StepComplete) res
 
   handle (ExecutingStmt (ValidConn c) (ValidStmt s) StepComplete) (GetColumnDataSize i) k = do
-    res <- mkForeign (FFun "sqlite3_column_bytes_idr" [FPtr, FInt] FInt) c i
+    res <- ioe_lift (mkForeign (FFun "sqlite3_column_bytes_idr" [FPtr, FInt] FInt) c i)
     k (ExecutingStmt (ValidConn c) (ValidStmt s) StepComplete) res
 
   handle (ExecutingStmt (ValidConn c) (ValidStmt s) StepComplete) (GetColumnInt i) k = do
-    res <- mkForeign (FFun "sqlite3_column_int_idr" [FPtr, FInt] FInt) c i
+    res <- ioe_lift (mkForeign (FFun "sqlite3_column_int_idr" [FPtr, FInt] FInt) c i)
     k (ExecutingStmt (ValidConn c) (ValidStmt s) StepComplete) res
 
+  -- Failure is, however, indicated in the getColumnText function. This allows us to fail the
+  -- computation, should a null pointer be returned. This is necessary, as null pointers will
+  -- cause a segmentation fault.
   handle (ExecutingStmt (ValidConn c) (ValidStmt s) StepComplete) (GetColumnText i) k = do
-    -- This is horrifically hacky in every single way. Fix up!
-    res <- mkForeign (FFun "sqlite3_column_text_idr" [FPtr, FInt] FPtr) c i 
-    -- FIXME: Make this into a maybe
-    is_null <- nullPtr res
-    if is_null then do --putStrLn "null ptr in gtc"
-                       k (ExecutingStmt (ValidConn c) (ValidStmt s) StepComplete) ""
-               else do res' <- mkForeign (FFun "sqlite3_column_text_idr" [FPtr, FInt] FString) c i
-                       k (ExecutingStmt (ValidConn c) (ValidStmt s) StepComplete) res'
+    res <- ioe_lift (mkForeign (FFun "sqlite3_column_text_idr" [FPtr, FInt] FPtr) c i)
+    is_null <- ioe_lift (nullPtr res)
+    if (not is_null) then do res' <- ioe_lift (mkForeign (FFun "sqlite3_column_text_idr" [FPtr, FInt] FString) c i)
+                             k (ExecutingStmt (ValidConn c) (ValidStmt s) StepComplete) res'
+                     else ioe_fail DBArgFail
+
 
   -- Pass-through handlers
-  -- Urgh, perhaps best to encapsulate these failures in a maybe?
-  -- In fact, we *really* should. Otherwise these values may be used in further
-  -- computations in some circumstances.
+  -- If these get executed, then we're attempting to get row info when there's no valid row
+  -- loaded in by nextRow (for example if we have retrieved all valid rows, or some failure has
+  -- occurred along the way). Generally, this behaviour in the C library is undefined. We may,
+  -- however, use our knowledge of this to catch this condition, throw an exception and in
+  -- turn prevent these calls to the underlying library from being made.
+  handle (ExecutingStmt x y z) (GetColumnName i) k = ioe_fail DBArgFail
 
-  handle (ExecutingStmt x y z) (GetColumnName i) k = 
-    k (ExecutingStmt x y z) ""
+  handle (ExecutingStmt x y z) (GetColumnDataSize i) k = ioe_fail DBArgFail 
 
-  handle (ExecutingStmt x y z) (GetColumnDataSize i) k = 
-    k (ExecutingStmt x y z) (-1)
+  handle (ExecutingStmt x y z) (GetColumnText i) k = ioe_fail DBArgFail 
 
-  handle (ExecutingStmt x y z) (GetColumnText i) k = 
-    k (ExecutingStmt x y z) ""
-
-  handle (ExecutingStmt x y z) (GetColumnInt i) k = 
-    k (ExecutingStmt x y z) (-1)
+  handle (ExecutingStmt x y z) (GetColumnInt i) k = ioe_fail DBArgFail 
 
   -- Step and reset
   -- Only actually call the underlying library if in either the Unstarted / StepComplete
   -- states. Calling this in other states should fail without calling the library.
   handle (ExecutingStmt (ValidConn c) (ValidStmt s) Unstarted) RowStep k = do
-    res <- mkForeign (FFun "sqlite3_step_idr" [FPtr] FInt) c
-{-    -- hacky log
-    file <- openFile "/tmp/rowstep_log.log" Write
-    fwrite file (show res) 
-    closeFile file -}
-    --putStrLn $ "Res: " ++ (show res)
+    res <- ioe_lift (mkForeign (FFun "sqlite3_step_idr" [FPtr] FInt) c)
     let step_res = stepResult res
-    k (ExecutingStmt (ValidConn c) (ValidStmt s) step_res) step_res
+    -- If we get a StepFail, then something's gone wrong in the underlying library.
+    -- We detect this, and report it as an exception. Other conditions, for example
+    -- NoMoreRows (if all rows have been evaluated) are instead reflected in the resource.
+    case step_res of 
+      StepFail => ioe_fail DBExecuteFail
+      _ => k (ExecutingStmt (ValidConn c) (ValidStmt s) step_res) step_res
 
   handle (ExecutingStmt (ValidConn c) (ValidStmt s) StepComplete) RowStep k = do
-    res <- mkForeign (FFun "sqlite3_step_idr" [FPtr] FInt) c
-    --putStrLn $ "Res: " ++ (show res)
+    res <- ioe_lift (mkForeign (FFun "sqlite3_step_idr" [FPtr] FInt) c)
     let step_res = stepResult res
-    k (ExecutingStmt (ValidConn c) (ValidStmt s) step_res) step_res
+    case step_res of
+      StepFail => ioe_fail DBExecuteFail
+      _ => k (ExecutingStmt (ValidConn c) (ValidStmt s) step_res) step_res
 
-  handle (ExecutingStmt (ValidConn c) (ValidStmt s) x) RowStep k = do
-    k (ExecutingStmt (ValidConn c) (ValidStmt s) x) StepFail
-
+  -- RowStep shouldn't be called unless we are in the Unstarted / StepComplete row states.
+  -- If this is called in any other state, it's an exception.
   handle (ExecutingStmt x y z) RowStep k = 
-    k (ExecutingStmt x y z) StepFail
+    ioe_fail DBExecuteFail
 
   handle (ExecutingStmt (ValidConn c) (ValidStmt s) x) Reset k = do
-    res <- mkForeign (FFun "sqlite3_reset_idr" [FPtr] FInt) c
-    k (ExecutingStmt (ValidConn c) (ValidStmt s) Unstarted) (res == sqlite_OK)
+    res <- ioe_lift (mkForeign (FFun "sqlite3_reset_idr" [FPtr] FInt) c)
+    if res == sqlite_OK then
+       k (ExecutingStmt (ValidConn c) (ValidStmt s) Unstarted) ()
+     else
+       ioe_fail DBResetFail
 
   handle (ExecutingStmt (ValidConn c) InvalidStmt x) Reset k = 
-    k (ExecutingStmt (ValidConn c) InvalidStmt StepFail) False
-  handle (ExecutingStmt InvalidConn x y) Reset k = k (ExecutingStmt InvalidConn x StepFail) False
+    ioe_fail DBResetFail 
+  handle (ExecutingStmt InvalidConn x y) Reset k = 
+    ioe_fail DBResetFail
 
   -- Finalise statement
   handle (ExecutingStmt (ValidConn c) (ValidStmt s) x) Finalise k = do
-    res <- mkForeign (FFun "sqlite3_finalize_idr" [FPtr] FInt) s
-    k (OpenConn (ValidConn c)) (res == sqlite_OK)
+    res <- ioe_lift (mkForeign (FFun "sqlite3_finalize_idr" [FPtr] FInt) s)
+    if res == sqlite_OK then k (OpenConn (ValidConn c)) ()
+                        else ioe_fail DBFinaliseFail
 
   handle (ExecutingStmt (ValidConn c) InvalidStmt x) Finalise k = 
-    k (OpenConn (ValidConn c)) False
+    ioe_fail DBFinaliseFail
 
-  handle (ExecutingStmt InvalidConn x y) Finalise k = k (OpenConn InvalidConn) False
-
+  handle (ExecutingStmt InvalidConn x y) Finalise k = 
+   ioe_fail DBFinaliseFail
+ 
 SQLITE : Type -> EFFECT
 SQLITE t = MkEff t Sqlite
 
 -- Effect functions
-openDB : String -> EffM m [SQLITE ()] [SQLITE (SQLiteRes ConnectionOpened)] Bool
+openDB : String -> EffM (IOExcept DBError) [SQLITE ()] [SQLITE (SQLiteRes ConnectionOpened)] Bool
 openDB filename = (OpenDB filename)
 
-closeDB : EffM m [SQLITE (SQLiteRes ConnectionOpened)] [SQLITE ()] Bool
+closeDB : EffM (IOExcept DBError) [SQLITE (SQLiteRes ConnectionOpened)] [SQLITE ()] Bool
 closeDB = CloseDB 
 
-prepareStatement : String -> EffM m [SQLITE (SQLiteRes ConnectionOpened)] 
+prepareStatement : String -> EffM (IOExcept DBError) [SQLITE (SQLiteRes ConnectionOpened)] 
                                     [SQLITE (SQLiteRes PreparedStatementOpen)] Bool
 prepareStatement stmt = (PrepareStatement stmt)
 
-startBind : EffM m [SQLITE (SQLiteRes PreparedStatementOpen)] 
+startBind : EffM (IOExcept DBError) [SQLITE (SQLiteRes PreparedStatementOpen)] 
                    [SQLITE (SQLiteRes PreparedStatementBinding)] ()
 startBind = StartBind
 
-bindInt : ArgPos -> Int -> Eff m [SQLITE (SQLiteRes PreparedStatementBinding)] Bool
+bindInt : ArgPos -> Int -> Eff (IOExcept DBError) [SQLITE (SQLiteRes PreparedStatementBinding)] Bool
 bindInt pos i = (BindInt pos i)
 
-bindFloat : ArgPos -> Float -> Eff m [SQLITE (SQLiteRes PreparedStatementBinding)] Bool
+bindFloat : ArgPos -> Float -> Eff (IOExcept DBError) [SQLITE (SQLiteRes PreparedStatementBinding)] Bool
 bindFloat pos i = (BindFloat pos i)
 
 natToInt : Nat -> Int
 natToInt O = 0
 natToInt (S k) = 1 + (natToInt k)
 
-bindText : ArgPos -> String -> Eff m [SQLITE (SQLiteRes PreparedStatementBinding)] Bool
+bindText : ArgPos -> String -> Eff (IOExcept DBError) [SQLITE (SQLiteRes PreparedStatementBinding)] Bool
 bindText pos str = (BindText pos str str_len)
   where 
         str_len : Int
         str_len = natToInt (length str)
 
-bindNull : ArgPos -> Eff m [SQLITE (SQLiteRes PreparedStatementBinding)] Bool
+bindNull : ArgPos -> Eff (IOExcept DBError) [SQLITE (SQLiteRes PreparedStatementBinding)] Bool
 bindNull pos = (BindNull pos)
 
-finishBind : EffM m [SQLITE (SQLiteRes PreparedStatementBinding)] 
+finishBind : EffM (IOExcept DBError) [SQLITE (SQLiteRes PreparedStatementBinding)] 
                     [SQLITE (SQLiteRes PreparedStatementBound)] Bool
 finishBind = FinishBind
 
-beginExecution : EffM m [SQLITE (SQLiteRes PreparedStatementBound)] 
+beginExecution : EffM (IOExcept DBError) [SQLITE (SQLiteRes PreparedStatementBound)] 
                         [SQLITE (SQLiteRes PreparedStatementExecuting)] ()
 beginExecution = ExecuteStatement
 
-finaliseStatement : EffM m [SQLITE (SQLiteRes PreparedStatementExecuting)]
+finaliseStatement : EffM (IOExcept DBError) [SQLITE (SQLiteRes PreparedStatementExecuting)]
                            [SQLITE (SQLiteRes ConnectionOpened)]
                            Bool
 finaliseStatement = Finalise
 
-getColumnName : Int -> Eff m [SQLITE (SQLiteRes PreparedStatementExecuting)] String
+getColumnName : Int -> Eff (IOExcept DBError) [SQLITE (SQLiteRes PreparedStatementExecuting)] String
 getColumnName pos = (GetColumnName pos)
 
-getColumnDataSize : Int -> Eff m [SQLITE (SQLiteRes PreparedStatementExecuting)] Int
+getColumnDataSize : Int -> Eff (IOExcept DBError) [SQLITE (SQLiteRes PreparedStatementExecuting)] Int
 getColumnDataSize pos = (GetColumnDataSize pos)
 
-getColumnText : Int -> Eff m [SQLITE (SQLiteRes PreparedStatementExecuting)] String
+getColumnText : Int -> Eff (IOExcept DBError) [SQLITE (SQLiteRes PreparedStatementExecuting)] String
 getColumnText pos = (GetColumnText pos)
 
-getColumnInt : Int -> Eff m [SQLITE (SQLiteRes PreparedStatementExecuting)] Int
+getColumnInt : Int -> Eff (IOExcept DBError) [SQLITE (SQLiteRes PreparedStatementExecuting)] Int
 getColumnInt pos = (GetColumnInt pos)
 
-nextRow : Eff m [SQLITE (SQLiteRes PreparedStatementExecuting)] StepResult
+nextRow : Eff (IOExcept DBError) [SQLITE (SQLiteRes PreparedStatementExecuting)] StepResult
 nextRow = RowStep
-resetPos : Eff m [SQLITE (SQLiteRes PreparedStatementExecuting)] Bool
+resetPos : Eff (IOExcept DBError) [SQLITE (SQLiteRes PreparedStatementExecuting)] Bool
 resetPos = Reset
 
+{-
 -- Utility functions to help handle failure
 -- TODO: These errors should ideally be encoded as ADTs
-connFail : EffM m [SQLITE (SQLiteRes ConnectionOpened)] [SQLITE ()] String
+connFail : EffM (IOExcept DBError) [SQLITE (SQLiteRes ConnectionOpened)] [SQLITE ()] String
 connFail = do closeDB
               pure "Error connecting to database."
 
-stmtFail : EffM m [SQLITE (SQLiteRes PreparedStatementOpen)] [SQLITE ()] String
+stmtFail : EffM (IOExcept DBError) [SQLITE (SQLiteRes PreparedStatementOpen)] [SQLITE ()] String
 stmtFail = do
   -- These will all fall through without having any effect.
   -- Right Way To Do It?
@@ -439,21 +417,21 @@ stmtFail = do
   closeDB -- Close the connection
   pure "Error preparing statement"
 
-bindFail : EffM m [SQLITE (SQLiteRes PreparedStatementBound)] [SQLITE ()] String
+bindFail : EffM (IOExcept DBError) [SQLITE (SQLiteRes PreparedStatementBound)] [SQLITE ()] String
 bindFail = do
   beginExecution
   finaliseStatement
   closeDB
   pure "Error binding to statement"
 
-executeFail : EffM m [SQLITE (SQLiteRes PreparedStatementExecuting)] [SQLITE ()] String
+executeFail : EffM (IOExcept DBError) [SQLITE (SQLiteRes PreparedStatementExecuting)] [SQLITE ()] String
 executeFail = do
   finaliseStatement
   closeDB
   pure "Error executing statement"
 
 
-executeInsert' : EffM m [SQLITE (SQLiteRes PreparedStatementExecuting)] [SQLITE (SQLiteRes ConnectionOpened)] (Either String Int) -- (Maybe Int)
+executeInsert' : EffM (IOExcept DBError) [SQLITE (SQLiteRes PreparedStatementExecuting)] [SQLITE (SQLiteRes ConnectionOpened)] (Either String Int) -- (Maybe Int)
 executeInsert' = do
  id_res <- nextRow 
  case id_res of
@@ -469,7 +447,7 @@ executeInsert' = do
 -- Execute an insert statement, get the last inserted row ID
 -- TODO: Create a binding to the SQLITE API function, instead of getting
 --       last row ID by a query
-executeInsert : EffM m [SQLITE (SQLiteRes PreparedStatementExecuting)] [SQLITE (SQLiteRes ConnectionOpened)] (Either String Int)
+executeInsert : EffM (IOExcept DBError) [SQLITE (SQLiteRes PreparedStatementExecuting)] [SQLITE (SQLiteRes ConnectionOpened)] (Either String Int)
 executeInsert = do
   next_row_res <- nextRow
   case next_row_res of
@@ -493,7 +471,7 @@ executeInsert = do
         finaliseStatement
         Effects.pure $ Left "Error inserting! StmtFail"
 
-multiBind' : List (Int, DBVal) -> Eff m [SQLITE (SQLiteRes PreparedStatementBinding)] ()
+multiBind' : List (Int, DBVal) -> Eff (IOExcept DBError) [SQLITE (SQLiteRes PreparedStatementBinding)] ()
 multiBind' [] = Effects.pure ()
 multiBind' ((pos, (DBInt i)) :: xs) = do bindInt pos i
                                          multiBind' xs
@@ -502,7 +480,7 @@ multiBind' ((pos, (DBFloat f)) :: xs) = do bindFloat pos f
 multiBind' ((pos, (DBText t)) :: xs) = do bindText pos t
                                           multiBind' xs
 -- Binds multiple values within a query
-multiBind : List (Int, DBVal) -> EffM m [SQLITE (SQLiteRes PreparedStatementOpen)] [SQLITE (SQLiteRes PreparedStatementBound)] Bool
+multiBind : List (Int, DBVal) -> EffM (IOExcept DBError) [SQLITE (SQLiteRes PreparedStatementOpen)] [SQLITE (SQLiteRes PreparedStatementBound)] Bool
 multiBind vals = do
   startBind
   multiBind' vals
@@ -514,19 +492,18 @@ multiBind vals = do
 executeSelect : String ->
                 String -> 
                 List (Int, DBVal) -> 
-                (Eff m [SQLITE (SQLiteRes PreparedStatementExecuting)] (Either String ResultSet)) -> 
-                Eff m [SQLITE ()] (Either String ResultSet)
-executeSelect db_name q bind_vals fn = do
-  conn <- openDB db_name
-  if conn then do
-    prep_sql <- prepareStatement q
-    if prep_sql then do
-      bind_res <- multiBind bind_vals
-      if bind_res then do
-        beginExecution
-        res <- fn
-        finaliseStatement
-        closeDB
+                (Eff (IOExcept DBError) [SQLITE (SQLiteRes PreparedStatementExecuting)] (Either String ResultSet)) -> 
+                Eff (IOExcept DBError) [SQLITE ()] (Either String ResultSet)
+executeSelect db_name q bind_vals fn = 
+catch ( do
+  openDB db_name
+  prepareStatement q
+  multiBind bind_vals
+  beginExecution
+  res <- fn
+  finaliseStatement
+  closeDB ) (\err => Left err)
+{-
         Effects.pure $ res
       else do
         err <- bindFail
@@ -537,4 +514,4 @@ executeSelect db_name q bind_vals fn = do
   else do
     err <- connFail
     Effects.pure $ Left err
-      
+  -}    
