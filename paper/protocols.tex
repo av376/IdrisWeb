@@ -53,7 +53,9 @@ Figure~\ref{fig:cgistates} shows the states through which the CGI program
 progresses, and Figure~\ref{fig:cgieffect} shows how this is represented
 as a resource-dependent algebraic effect. Each operation performed in an effectful
 program requires the resource to be of a certain type, and the completion of
-the operation may alter the type or value of the resource.
+the operation may alter the type or value of the resource. The \texttt{Cgi}
+effect declaration shows these resource updates in the types of each operation,
+effectively specifying a state machine.
 
 Upon creation, the CGI application is uninitialised, meaning that environment variables have not been queried to populate the CGI state. The only operation
 that can be performed in this state is initialisation: by calling
@@ -62,30 +64,28 @@ to \texttt{Initialised}. The \texttt{Init} operation is defined as part of the
 \texttt{Cgi} effect, and involves transitioning from the uninitialised state to
 the initialised state.
 
-\begin{figure}[h]
-\begin{Verbatim}
+\begin{SaveVerbatim}{cgieff}
+{-                     { Input resource type }         { Output resource type }        { Value } -}
+
 data Cgi : Effect where
-    Init : Cgi () (InitialisedCGI Initialised) ()
-    StartRun : Cgi (InitialisedCGI Initialised) 
-                   (InitialisedCGI TaskRunning) ()
-    FinishRun : Cgi (InitialisedCGI TaskRunning) 
-                    (InitialisedCGI TaskCompleted) ()
-    WriteHeaders : Cgi (InitialisedCGI TaskCompleted) 
-                       (InitialisedCGI HeadersWritten) ()
-    WriteContent : Cgi (InitialisedCGI HeadersWritten) 
-                       (InitialisedCGI ContentWritten) ()
-    OutputData : String -> 
-                 Cgi (InitialisedCGI TaskRunning) 
-                     (InitialisedCGI TaskRunning) ()
-    RunAction : Env IO (CGI (InitialisedCGI TaskRunning) 
-                               :: effs) -> 
-                       CGIProg effs a -> 
-                       Cgi (InitialisedCGI TaskRunning) 
-                           (InitialisedCGI TaskRunning) a
-\end{Verbatim}
+    Init         : Cgi ()                              (InitialisedCGI Initialised)    ()
+    StartRun     : Cgi (InitialisedCGI Initialised)    (InitialisedCGI TaskRunning)    ()
+    FinishRun    : Cgi (InitialisedCGI TaskRunning)    (InitialisedCGI TaskCompleted)  ()
+    WriteHeaders : Cgi (InitialisedCGI TaskCompleted)  (InitialisedCGI HeadersWritten) ()
+    WriteContent : Cgi (InitialisedCGI HeadersWritten) (InitialisedCGI ContentWritten) ()
+    OutputData   : String -> 
+                   Cgi (InitialisedCGI TaskRunning)    (InitialisedCGI TaskRunning)    ()
+    RunAction    : Env IO (CGI (InitialisedCGI TaskRunning) :: effs) -> CGIProg effs a -> 
+                   Cgi (InitialisedCGI TaskRunning)    (InitialisedCGI TaskRunning)    a
+\end{SaveVerbatim}
+
+\begin{figure*}[t]
+\begin{center}
+\BUseVerbatim{cgieff}
+\end{center}
 \caption{CGI Effect}
 \label{fig:cgieffect}
-\end{figure}
+\end{figure*}
 
 Additional operations, including those to query POST and GET variables, are omitted in the interest of brevity.
 
@@ -135,7 +135,7 @@ main = runCGI [initCGIState] sayHello
   \node[state]         (C) [below of=B] {PreparedStatementOpen};
   \node[state]         (D) [below of=C] {PreparedStatementBinding};
   \node[state]         (E) [below of=D] {PreparedStatementBound};
-  \node[state]         (F) [below of=E] {PreparedStatementExecuting};
+  \node[state]         (F) [below of=E] {PreparedStatementExec};
 
   \path (A) edge[stateEdge]   node[edgeLabel, xshift=3em] {\texttt{openDB}} (B)
         (B) edge[stateEdge, bend right=80]   node[edgeLabel, text width=2cm, xshift=3em] {\texttt{closeDB, connFail}} (A)
@@ -166,51 +166,33 @@ by the \texttt{Sqlite} effect (Figure \ref{fig:dbeffect}; we again omit some ope
 bind and retrieve data types other than \texttt{String}, in the interest of
 brevity).
 
-\begin{figure}[h]
-\begin{Verbatim}[samepage]
+\begin{SaveVerbatim}{databaseeff}
+{-                   { Input resource type }                     { Output resource type }             { Value } -}
+
 data Sqlite : Effect where
-  OpenDB : 
-    String -> 
-    Sqlite () 
-           (SQLiteRes ConnectionOpened) Bool
-  CloseDB : 
-    Sqlite (SQLiteRes ConnectionOpened) () Bool
-  PrepareStatement : 
-    String -> 
-    Sqlite (SQLiteRes ConnectionOpened) 
-           (SQLiteRes PreparedStatementOpen) Bool
-  StartBind : 
-    Sqlite (SQLiteRes PreparedStatementOpen) 
-           (SQLiteRes PreparedStatementBinding) ()
-  BindText : 
-    ArgPos -> String -> Int -> 
-    Sqlite (SQLiteRes PreparedStatementBinding) 
-           (SQLiteRes PreparedStatementBinding) 
-           Bool
-  FinishBind : 
-    Sqlite (SQLiteRes PreparedStatementBinding) 
-           (SQLiteRes PreparedStatementBound) 
-           Bool
-  ExecuteStatement : 
-    Sqlite (SQLiteRes PreparedStatementBound) 
-           (SQLiteRes PreparedStatementExecuting) ()
-  Finalise : 
-    Sqlite (SQLiteRes PreparedStatementExecuting) 
-           (SQLiteRes ConnectionOpened) 
-           Bool
-  GetColumnText : 
-    Int -> 
-    Sqlite (SQLiteRes PreparedStatementExecuting)
-           (SQLiteRes PreparedStatementExecuting)
-           String
-  RowStep : 
-    Sqlite (SQLiteRes PreparedStatementExecuting)
-           (SQLiteRes PreparedStatementExecuting)
-           StepResult
-\end{Verbatim}
+  OpenDB           : String -> 
+                     Sqlite ()                                   (SQLiteRes ConnectionOpened)         Bool
+  CloseDB          : Sqlite (SQLiteRes ConnectionOpened)         ()                                   Bool
+  PrepareStatement : String -> 
+                     Sqlite (SQLiteRes ConnectionOpened)         (SQLiteRes PreparedStatementOpen)    Bool
+  StartBind        : Sqlite (SQLiteRes PreparedStatementOpen)    (SQLiteRes PreparedStatementBinding) ()
+  BindText         : ArgPos -> String -> Int -> 
+                     Sqlite (SQLiteRes PreparedStatementBinding) (SQLiteRes PreparedStatementBinding) Bool
+  FinishBind       : Sqlite (SQLiteRes PreparedStatementBinding) (SQLiteRes PreparedStatementBound)   Bool
+  ExecuteStatement : Sqlite (SQLiteRes PreparedStatementBound)   (SQLiteRes PreparedStatementExec)    ()
+  Finalise         : Sqlite (SQLiteRes PreparedStatementExec)    (SQLiteRes ConnectionOpened)         Bool
+  GetColumnText    : Int -> 
+                     Sqlite (SQLiteRes PreparedStatementExec)    (SQLiteRes PreparedStatementExec)    String
+  RowStep          : Sqlite (SQLiteRes PreparedStatementExec)    (SQLiteRes PreparedStatementExec)    StepResult
+\end{SaveVerbatim}
+
+\begin{figure*}[t]
+\begin{center}
+\BUseVerbatim{databaseeff}
+\end{center}
 \caption{Database Effect}
 \label{fig:dbeffect}
-\end{figure}
+\end{figure*}
 
 There are three main phases involved in the usage of the SQLite protocol: connection to the database, preparation of a query, and execution of the query. This is reflected in the associated resource \texttt{SQLiteRes}, which again is parameterised by the current protocol state.
 \begin{Verbatim}
@@ -282,7 +264,7 @@ A call to \texttt{prepareStatement} attempts to create a prepared statement, and
 \begin{Verbatim}
 collectResults : 
   Eff IO 
-  [SQLITE (SQLiteRes PreparedStatementExecuting)] 
+  [SQLITE (SQLiteRes PreparedStatementExec)] 
   (List (String, Int))
 collectResults = do
   step_result <- nextRow
@@ -310,7 +292,7 @@ Using these, we may implement a function, \texttt{ExecuteSelect}, which, given a
 \begin{Verbatim}
 executeSelect : 
   String -> String -> List (Int, DBVal) -> 
-  (Eff m [SQLITE (SQLiteRes PreparedStatementExecuting)] 
+  (Eff m [SQLITE (SQLiteRes PreparedStatementExec)] 
                  (List DBVal)) -> 
   Eff m [SQLITE ()] (Either String ResultSet)
 \end{Verbatim}
@@ -323,44 +305,30 @@ A major strength of the \texttt{Effects} library is that it allows for simple co
 We implement this by having a SQLite database, containing two tables: \texttt{session}, which stores session keys and their associated expiry dates, and \texttt{sessiondata}, which contains the data associated with each session. A datum associated with the session is described as a tagged union containing one of the primitive types \texttt{String}, \texttt{Bool} or \texttt{Int}, which is serialised alongside a type tag for storage in the database.
 %TODO: Fix up the labels
 
-\begin{figure}[h]
-\begin{Verbatim}[samepage]
+\begin{SaveVerbatim}{sessioneff}
+{-                        { Input resource type }            { Output resource type }   { Value }        -}
+
 data Session : Effect where
-  LoadSession : 
-  SessionID -> 
-  Session (SessionRes SessionUninitialised) 
-          (SessionRes SessionInitialised) 
-          (Maybe SessionData)
-  UpdateSession : 
-    SessionData -> 
-    Session (SessionRes SessionInitialised) 
-            (SessionRes SessionInitialised) ()
-  CreateSession : 
-    SessionData -> 
-    Session (SessionRes SessionUninitialised) 
-            (SessionRes SessionInitialised) 
-            (Maybe SessionID)
-  DeleteSession : 
-    Session (SessionRes SessionInitialised) 
-            (SessionRes SessionUninitialised) Bool 
-  WriteToDB : 
-    Session (SessionRes SessionInitialised) 
-            (SessionRes SessionUninitialised) Bool
-  DiscardSessionChanges : 
-    Session (SessionRes SessionInitialised) 
-            (SessionRes SessionUninitialised) ()
-  GetSessionID : 
-    Session (SessionRes SessionInitialised) 
-            (SessionRes SessionInitialised) 
-            (Maybe SessionID)
-  GetSessionData : 
-    Session (SessionRes SessionInitialised) 
-            (SessionRes SessionInitialised) 
-            (Maybe SessionData)
-\end{Verbatim}
+  LoadSession           : SessionID -> 
+                          Session (SessionRes SessionClosed) (SessionRes SessionOpen)   (Maybe SessionData)
+  UpdateSession         : SessionData -> 
+                          Session (SessionRes SessionOpen)   (SessionRes SessionOpen)   ()
+  CreateSession         : SessionData -> 
+                          Session (SessionRes SessionClosed) (SessionRes SessionOpen)   (Maybe SessionID)
+  DeleteSession         : Session (SessionRes SessionOpen)   (SessionRes SessionClosed) Bool 
+  WriteToDB             : Session (SessionRes SessionOpen)   (SessionRes SessionClosed) Bool
+  DiscardSessionChanges : Session (SessionRes SessionOpen)   (SessionRes SessionClosed) ()
+  GetSessionID          : Session (SessionRes SessionOpen)   (SessionRes SessionOpen)   (Maybe SessionID)
+  GetSessionData        : Session (SessionRes SessionOpen)   (SessionRes SessionOpen)   (Maybe SessionData)
+\end{SaveVerbatim}
+
+\begin{figure*}[t]
+\begin{center}
+\BUseVerbatim{sessioneff}
+\end{center}
 \caption{Session Effect}
 \label{fig:sessioneffect}
-\end{figure}
+\end{figure*}
 
 \begin{figure}[htpb!]
 \centering
@@ -372,8 +340,8 @@ data Session : Effect where
   \tikzstyle{stateEdge} = [stateEdgePortion,->];
   \tikzstyle{edgeLabel} = [pos=0.5, font={\sffamily\small}];
 
-  \node[initial,state] (A)              {SessionUninitialised};
-  \node[state]         (B) [below of=A] {SessionInitialised};
+  \node[initial,state] (A)              {SessionClosed};
+  \node[state]         (B) [below of=A] {SessionOpen};
 
   \path (A) edge[stateEdge]   node[edgeLabel, xshift=-1cm, text width=3cm] {\texttt{loadSession, createSession}} (B)
         (B) edge[stateEdge, bend right=80]   node[edgeLabel, xshift=6em, text width=3cm] {\texttt{writeToDB, discardSessionChanges, deleteSession}} (A)
@@ -387,9 +355,9 @@ data Session : Effect where
 Figure ~\ref{fig:sessionstates} shows the resource usage protocol associated
 with the session handler, and Figure \ref{fig:sessioneffect} the corresponding
 algebraic effect. In this application, there exist two states:
-In \texttt{SessionUninitialised}, the user may load or create a
+In \texttt{SessionClosed}, the user may load or create a
 session.
-In \texttt{SessionInitialised}, the user may update the
+In \texttt{SessionOpen}, the user may update the
 representation of the session in memory, serialise the session and write it to
 the database, or delete the session and invalidate the user's session key. The
 introduction of these two states ensures that changes are explicitly either
@@ -402,8 +370,8 @@ Much like the SQLite effect, we encapsulate failure by reflecting it in the
 resource associated with the effect. 
 
 \begin{Verbatim}
-data SessionStep = SessionUninitialised
-                 | SessionInitialised
+data SessionStep = SessionClosed
+                 | SessionOpen
 
 data SessionRes : SessionStep -> Type where
   InvalidSession : SessionRes s  
