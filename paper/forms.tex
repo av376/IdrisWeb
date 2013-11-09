@@ -155,7 +155,6 @@ using (G : List FormTy, E : List WebEffect)
     AddCheckBoxes   : (label : String) -> (fty : FormTy) -> (vals : Vect m (interpFormTy fty)) ->
                       (names : Vect m String) -> (checked_boxes : Vect m Bool) ->
                       Form (FormRes G E)  (FormRes ((FormList fty) :: G) E) ()
-
     Submit          : (mkHandlerFn ((reverse G), E)) -> String -> 
                       Form (FormRes G E)  (FormRes [] [])       String
 \end{SaveVerbatim}
@@ -422,19 +421,19 @@ using (xs : HanderList , f : mkHandler (reverse G, E))
 \noindent
 \texttt{FnElem} is parameterised over \texttt{G} and \text{E}, the types of the
 form elements and the effects used by the handler function. \texttt{FnHere}
-demonstrates that the element is at the head of the current point of the list,
-whereas \texttt{FnThere} demonstrates that the element is at some point further
-in the list. 
+is a proof that the element is at the head of the current point of the list,
+whereas \texttt{FnThere} is a proof that the element is in the tail of 
+the list. 
 %TODO: this should probably be rewritten
-We may then use reflection and a simple automated proof search to
+We then use a simple automated proof search to
 automatically generate the proof at compile time, should one exist. The proof
 may then be used in subsequent computations: in our case, we use it to retrieve
 the unique identifier for the function. If the automated proof search fails,
 compilation will fail.
 
-Finally, we must serialise the argument types, supported effects, and return
-type of the handler function, in order to allow the form data to be correctly
-deserialised and ensure that the correct handler function is executed on the
+Finally, we serialise the argument types, supported effects, and return
+type of the handler, to allow the form data to be 
+deserialised and ensure that the correct handler is executed on the
 server. 
 
 Although sending details of the handler function to the client may appear to be
@@ -451,15 +450,15 @@ hidden HTML field.
 \subsection{Form Handling}
 \label{formhandling}
 Once the form has been submitted, a web application may handle the submitted
-data by invoking the \texttt{HandleForm} CGI operation. This will check for the
+data by invoking \texttt{HandleForm}. This will check for the
 existence of the hidden \texttt{handler} field, which contains the previously
-serialised metadata about the form handling function, before deserialising the
+serialised metadata about the form handler, before deserialising the
 data into a \texttt{MkHandlerFnTy}. 
 
-With this data, we may then look up the function in the list of registered
-handlers by using the serialised unique handler identifier. In order to apply
+With this data, we then look up the function in the list of registered
+handlers by using the unique handler identifier. In order to apply
 the handler function to the data submitted in the form, we must first prove to
-the type-checker that the deserialised \texttt{MkHandlerFnTy} is the same as
+the type checker that the deserialised \texttt{MkHandlerFnTy} is the same as
 the one retrieved from the list of registered handlers. We do this by making
 use of the \texttt{decEq} function, which determines whether two types are
 equal, returning a proof of equality if so, and a proof of inequality if not.
