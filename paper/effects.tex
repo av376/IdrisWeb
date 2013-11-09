@@ -184,13 +184,16 @@ The following program type checks, and therefore implicitly carries
 a proof that the file resource protocol is followed correctly:
 
 \begin{SaveVerbatim}{testfile}
+
 testFile : Eff IO [FILE_IO (), STDIO] () 
 testFile = catch (do open "testFile" Read
                      str <- readLine
                      close
                      putStrLn str)
-                 (\err => putStrLn ("Error: " ++ show err))
+            (\err => putStrLn ("Error: " ++ show err))
+
 \end{SaveVerbatim}
+\useverb{testfile}
 
 \noindent
 The type of \texttt{testFile} states
