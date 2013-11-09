@@ -22,56 +22,71 @@ a given department, \texttt{\$dept}. We firstly construct an object
 representing a database connection, where the arguments are the database host,
 user, password and name respectively:
 
+\begin{SaveVerbatim}{conn}
 
-%
-\begin{Verbatim}
   $conn = new mysqli("localhost", "username", 
                      "password", "db");
-\end{Verbatim}
-%
+
+\end{SaveVerbatim}
+\useverb{conn}
+
+\noindent
 We then check to see if the connection was successful, and exit
 if not.  This check is optional, so
 it would be possible to omit it. However, this would cause
 problems with later steps.
 
-%
-\begin{Verbatim}
+\begin{SaveVerbatim}{connerr}
+
   if (mysqli_connect_errno()) {
       exit();
   }
-\end{Verbatim}
-%
+
+\end{SaveVerbatim}
+\useverb{connerr}
+
+\noindent
 We then create a prepared statement detailing our query, and bind the
 \texttt{`dept'} value:
 
-\begin{Verbatim}
+\begin{SaveVerbatim}{prepare}
+
   $stmt = $conn->prepare("SELECT `name`, `address` 
      FROM `staff` WHERE `dept` = ?);
   $stmt->bind_param('s', $dept);
-\end{Verbatim}
-%
+
+\end{SaveVerbatim}
+\useverb{prepare}
+
+\noindent
 After the parameters have been bound, we execute the statement, assign
 variables into which results will be stored, and fetch each row in turn. 
 Failure to execute a statement before attempting to fetch rows would cause an error, as would attempting to execute a statement without binding variables to it.
 
-%
-\begin{Verbatim}
-  $stmt->execute();
+\begin{SaveVerbatim}{stmtexec}
+
+$stmt->execute();
   $stmt->bind_result($name, $address);
   while ($stmt->fetch()) {
     printf("Name: %s, Age: %s", $name, $age);
   }
-\end{Verbatim}
-%
+
+\end{SaveVerbatim}
+\useverb{stmtexec}
+
+\noindent
 Finally, once the statement and connection are no longer needed, they should be
 closed in order to discard the associated resources:
 
-%
-\begin{Verbatim}
+\begin{SaveVerbatim}{connclose}
+
   $stmt->close();
   $conn->close();
-\end{Verbatim}
-%
+
+\end{SaveVerbatim}
+\useverb{connclose}
+
+\noindent
 Even in this small example, there exists a specific resource usage protocol.
 Firstly, a connection to the database must be opened. The object-oriented style
 used in the example encapsulates this to an extent, as the object must be

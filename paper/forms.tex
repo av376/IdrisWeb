@@ -109,71 +109,95 @@ interpFormTy FormFloat = Float
 interpFormTy (FormList a) = List (interpFormTy a)
 \end{Verbatim}
 %
+
+\begin{SaveVerbatim}{formeff}
+using (G : List FormTy, E : List WebEffect)
+  data FormRes : List FormTy -> List WebEffect -> Type where
+    FR : Nat -> List FormTy -> List WebEffect -> String -> FormRes G E
+  
+  data Form : Effect where
+    AddTextBox      : (label : String) -> (fty : FormTy) -> (Maybe (interpFormTy fty)) -> 
+                      Form (FormRes G E) (FormRes (fty :: G) E) () 
+    AddSelectionBox : (label : String) -> (fty : FormTy) -> (vals : Vect m (interpFormTy fty)) -> 
+                      (names : Vect m String) ->
+                      Form (FormRes G E)  (FormRes (fty :: G) E) ()
+    AddRadioGroup   : (label : String) -> (fty : FormTy) -> (vals : Vect m (interpFormTy fty)) ->
+                      (names : Vect m String) -> (default : Int) ->
+                      Form (FormRes G E)  (FormRes (fty :: G) E) ()
+    AddCheckBoxes   : (label : String) -> (fty : FormTy) -> (vals : Vect m (interpFormTy fty)) ->
+                      (names : Vect m String) -> (checked_boxes : Vect m Bool) ->
+                      Form (FormRes G E)  (FormRes ((FormList fty) :: G) E) ()
+
+    Submit          : (mkHandlerFn ((reverse G), E)) -> String -> 
+                      Form (FormRes G E)  (FormRes [] [])       String
+\end{SaveVerbatim}
+
+\begin{figure*}[t]
+\begin{center}
+\useverb{formeff}
+\end{center}
+\caption{Form Effect}
+\label{fig:formeffect}
+\end{figure*}
+
 In order to specify a form, we once again use \texttt{Effects}. By recording
 the type of each form element as it is added in the type of the form, we may
 statically ensure that the user-supplied handler function is of the correct
 type to handle the data supplied by the form: the specification of an
-incompatible handler will result in a compile-time type error.
+incompatible handler will result in a compile-time type error. The \texttt{Form}
+effect and associated resource \texttt{FormRes} is given in Figure 
+\ref{fig:formeffect}.
+The \texttt{using} notation here indicates that within
+the block, where \texttt{G} and \texttt{E} occur they are implicit arguments with
+the given type.
 
-\idris{} allows for implicit arguments to be bound across a block of code
-through \texttt{using} notation. We may therefore parameterise the 
-form data types over
-the types associated with each form element, and the effects required by the
-handler function.
+The general process of form construction is illustrated by the \texttt{AddTextBox}
+and \texttt{Submit} operations of the \texttt{Form} effect:
 
 \begin{Verbatim}
-using (G : List FormTy, E : List WebEffect)
-  data FormRes : List FormTy -> 
-                 List WebEffect -> Type where
-    FR : Nat -> 
-         List FormTy -> 
-         List WebEffect -> 
-         String -> 
-         FormRes G E
-  
   data Form : Effect where
-    AddTextBox : (label : String) -> 
-                 (fty : FormTy) -> 
-                 (Maybe (interpFormTy fty)) -> 
+    AddTextBox : (label : String) -> (fty : FormTy) -> 
+                 Maybe (interpFormTy fty) -> 
                  Form (FormRes G E) 
                       (FormRes (fty :: G) E) () 
-   ...
+     ...
    
-    Submit : (mkHandlerFn ((reverse G), E)) ->
-             String -> 
+    Submit : (mkHandlerFn ((reverse G), E)) -> String -> 
              Form (FormRes G E) (FormRes [] []) String
 \end{Verbatim}
-The implementation of the form effect also contains other constructs for
-additional form elements such as radio buttons and check boxes, but are omitted
-in the interest of brevity.
 
-We make use of the resource associated with the effect, \texttt{FormRes}, to
-construct the form. The resource allows us to record the types associated with
-each form element and the HTML required to display the form. The constructor,
-\texttt{FR}, requires the number of elements in the form in order to allow for
-the naming of new elements, the list of element types, the list of effects
-supported by the handler function, and the currently generated HTML for the
-form. 
-
-By parameterising the resource over a list of the types associated with each element and the effects supported by the handler function, we may ensure that only a handler function that is compatible with the submitted data may be specified. It is necessary to keep track of the element types at both the type and value level as we must use the values in later computations when serialising the handler function. 
-
-By adding elements to the form, the list of form types \texttt{G} is updated, as seen in the output value of \texttt{AddTextBox}. Additionally, HTML for the form element is generated, and stored in the resource. The generated HTML is subsequently returned by the \texttt{addSubmit} function in order for it to be displayed on the web page.
-
+\noindent
+These make use of the resource associated with the effect, \texttt{FormRes}, to
+construct the form. Adding a field such as a text box adds a new type, \texttt{fty}
+to the list of field types, carried in the resource. When the form is complete,
+the \texttt{Submit} operation adds a submit button and returns the
+HTML text for the form, flushing the list of field
+types, and using it to construct the type for an appropriate handler function.
+%
 To specify a form instance, we define a function of type \texttt{UserForm}:
+
 \begin{Verbatim}
   UserForm : Type
   UserForm = EffM m [FORM (FormRes []) 
                           (FormRes [])] String
 \end{Verbatim}
 All forms are required to include a submit button, as mandated by the
-requirement that the input and output resource contains an empty list of types;
-this requirement is fulfilled as per the output resource type of the
-\texttt{AddSubmit} operation. As the creation of a form is a return ()function
-which does not include side effects, we do not restrict the handler to IO as
-with previously-discussed effects, instead denoting the fact that it may be run
-in any handler with the implicit variable \texttt{m}.
+requirement that 
 
-Handlers may only be associated with a form if they have argument types corresponding to the types associated with the form elements. Additionally, we wish to name the function in order for it to be serialised, whilst requiring a proof that the specified name is associated with the function. If this were not the case, it would be possible to specify a function which satisfies the type requirement, without guaranteeing that it the serialised data corresponded to that function, thus rendering the check pointless. 
+The input and output resource contains an empty list of types, which means that
+any form which includes fields must also include a submit button. Adding fields
+adds to the list of types, and only adding a submit button empties that list.
+Note that there is no need to restrict this effect to running in the \texttt{IO}
+monad since creating a form merely returns HTML text, with no side-effects by
+default.
+
+Handlers may only be associated with a form if they have argument types
+corresponding to the types associated with the form elements. Additionally, we
+wish to name the function in order for it to be serialised, whilst requiring a
+proof that the specified name is associated with the function. If this were not
+the case, it would be possible to specify a function which satisfies the type
+requirement, without guaranteeing that it the serialised data corresponded to
+that function, thus rendering the check pointless. 
 
 Before associating a handler function with the form, we must specify the effects available to the handler. This is done through the use of the \texttt{useEffects}, which updates the list of effects in the type of the form resource. By doing this, we may subsequently use the effects in calculations at the type level, in particular when calculating the type of the handler function for the form. 
 \begin{Verbatim}
@@ -182,14 +206,31 @@ Before associating a handler function with the form, we must specify the effects
                       [FORM (FormRes G effs)] ()
   useEffects effs = (UseEffects effs)
 \end{Verbatim}
-Whilst it is not possible to serialise arbitrary effects due to the associated difficulties with serialising initial resource environments, we allow for three effects to be serialised: \texttt{CGI}, \texttt{SQLITE} and \texttt{SESSION}. This is, however, not an inherent limitation as the \texttt{Effects} library permits introduction of additional effects within an effectful computation.
+
+A \texttt{WebEffect} is an effect which is usable in a web application, and can
+be converted to an \texttt{EFFECT} using:
+
+\begin{SaveVerbatim}{interpwebeff}
+
+webEffect : WebEffect -> EFFECT
+
+\end{SaveVerbatim}
+\useverb{interpwebeff}
+
+Whilst it is not possible to serialise arbitrary effects due to the associated
+difficulties with serialising initial resource environments, we allow for three
+effects to be serialised: \texttt{CGI}, \texttt{SQLITE} and \texttt{SESSION}.
+This is, however, not an inherent limitation as the \texttt{Effects} library
+permits introduction of additional effects within an effectful computation.
 %
 We may specify a handler function of type \texttt{FormHandler}:
 \begin{Verbatim}
   FormHandler : List EFFECT -> Type
   FormHandler effs = Eff IO effs ()
 \end{Verbatim}
-In order to associate a handler with a form, we may call the \texttt{addSubmit} function:
+In order to associate a handler with a form, we may call the \texttt{addSubmit}
+function:
+
 \begin{Verbatim}
   addSubmit : 
     (f :  mkHandlerFn ((reverse G), E)) ->
@@ -205,20 +246,33 @@ In order to associate a handler with a form, we may call the \texttt{addSubmit} 
           name = getString' f handlers prf          
 \end{Verbatim}
 
-Let us look at each aspect of this function in turn. Firstly, the \texttt{mkHandlerFn} function calculates the required type of the handler function from the list of types associated with the form elements, and the effects we specified with \texttt{useEffects}. Note that since we prepend types to the list of \texttt{FormTy}s as opposed to appending them, we must reverse the list.
+This function takes a handler function and a list of available handlers, along with
+an automatically constructed proof (using the a \texttt{default} argument) that the
+handler is available.
+Let us look at each aspect of this function in turn. Firstly, the
+\texttt{mkHandlerFn} function calculates the required type of the handler
+function from the list of types associated with the form elements, and the
+effects we specified with \texttt{useEffects}. Note that since we prepend types
+to the list of \texttt{FormTy}s as opposed to appending them, we must reverse
+the list.
+
 \begin{Verbatim}
 MkHandlerFnTy : Type
 MkHandlerFnTy = (List FormTy, List WebEffect)
 
 mkHandlerFn' : List FormTy -> List WebEffect -> Type
-mkHandlerFn' [] effs = FormHandler (interpWebEffects effs) 
+mkHandlerFn' [] effs = FormHandler (map webEffect effs) 
 mkHandlerFn' (x :: xs) effs = Maybe (interpFormTy x) -> 
                               mkHandlerFn' xs effs 
 
 mkHandlerFn : MkHandlerFnTy -> Type 
 mkHandlerFn (tys, effs) = mkHandlerFn' tys effs 
 \end{Verbatim}
-The \texttt{mkHandlerFn} function takes a tuple describing the arguments and web effects available to the handler function. When constructing the function type, we encase all arguments withing \texttt{Maybe} type, in order to handle failure should the supplied data fail to parse to the specified type.
+
+The \texttt{mkHandlerFn} function takes a tuple describing the arguments and
+web effects available to the handler function. When constructing the function
+type, we encase all arguments withing \texttt{Maybe} type, in order to handle
+failure should the supplied data fail to parse to the specified type.
 
 To store a reference to a handler function, we use the \texttt{HandlerFn} type:
 \begin{Verbatim}
@@ -226,7 +280,15 @@ HandlerFn : Type
 HandlerFn = (ft ** (mkHandlerFn ft, String))
 \end{Verbatim}
 %
-The \texttt{**} notation denotes a dependent pair, wherein one argument, in this case the concrete handler function, depends on another, namely \texttt{MkHandlerFnTy} data used to construct the type of the handler function. We also store a unique string identifier, which is used to serialise a reference to the handler function. 
+The \texttt{**} notation denotes a dependent pair, where the type of the second
+element of the pair is parameterised over the value of the first element. It is
+an existential binding;
+the notation \texttt{(x ** P x)} can be read as ``there exists an \texttt{x} such that 
+\texttt{P x} holds''.
+Therefore a \texttt{HandlerFn} states that there exists a function type
+\texttt{ft} such that we have a handler for it, and a unique string identifier
+which is used to serialise a
+reference to the handler function. 
 
 In order to abstract away from this implementation detail, we make use of \idris{} syntax rewriting rules. This allows us to define the following syntax rewrite rule:
 \begin{Verbatim}
